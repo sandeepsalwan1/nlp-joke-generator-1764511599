@@ -22,7 +22,7 @@ from tensorflow.keras.utils import to_categorical
 import numpy as np
 nltk.download('punkt')
 
-DATA_DIR = "data"  # Changed from "../../data" since script runs from project root
+DATA_DIR = "compressed_data"  # Use compressed_data folder where CSV is stored
 MODEL_DIR = "models"  # Changed from "../models" since script runs from project root
 SENTENCE_BEGIN = "<s>"
 SENTENCE_END = "</s>"
