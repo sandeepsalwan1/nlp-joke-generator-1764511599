@@ -33,7 +33,7 @@ from prepare_data import (
 import numpy as np
 
 # Training parameters
-EPOCHS = 1
+EPOCHS = 3
 LEARNING_RATE = 5e-5
 BATCH_SIZE = 8
 MAX_LENGTH = 128  # Maximum sequence length for GPT-2
@@ -97,7 +97,7 @@ def prepare_joke_data():
         kaggle_jokes.append(joke)
     
     # Load reddit jokes (more samples for better training)
-    _, rjokes_tokens = read_rjokes_data("train.tsv", max_jokes=50000)
+    _, rjokes_tokens = read_rjokes_data("train.tsv", max_jokes=75000)
     rjokes = []
     for tokens in rjokes_tokens:
         joke = ' '.join([t for t in tokens if t not in ['<s>', '</s>', '_']])
@@ -128,13 +128,14 @@ def fine_tune_model(model, tokenizer, train_dataset, output_dir):
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         learning_rate=LEARNING_RATE,
         weight_decay=0.01,
-        warmup_steps=500,
-        logging_steps=100,
-        save_steps=1000,
+        warmup_steps=200,       # Optimized
+        logging_steps=50,       # More frequent logging
+        save_strategy="epoch",  # Save at end of each epoch
         save_total_limit=2,
-        fp16=torch.cuda.is_available(),  # Use mixed precision if GPU available
-        report_to="none",  # Disable wandb/tensorboard
+        fp16=torch.cuda.is_available(),
+        report_to="none",
         logging_dir=f"{output_dir}/logs",
+        dataloader_num_workers=2
     )
     
     # Initialize trainer
