@@ -7,15 +7,15 @@ set -e  # Exit on any error
 echo "=== NLP Joke Generator - RunPod Setup ==="
 
 # 1. Install system dependencies
-echo "[1/6] Installing system tools..."
+echo "[1/7] Installing system tools..."
 apt-get update && apt-get install -y git-lfs zip magic-wormhole
 
 # 2. Setup Git LFS
-echo "[2/6] Setting up Git LFS..."
+echo "[2/7] Setting up Git LFS..."
 git lfs install
 
 # 3. Clone the repository
-echo "[3/6] Cloning repository..."
+echo "[3/7] Cloning repository..."
 cd /workspace
 if [ -d "project" ]; then
     echo "Project already exists, pulling latest..."
@@ -28,15 +28,22 @@ else
 fi
 
 # 4. Pull large files (the 300MB CSV)
-echo "[4/6] Downloading large data files via Git LFS..."
+echo "[4/7] Downloading large data files via Git LFS..."
 git lfs pull
 
-# 5. Install Python dependencies
-echo "[5/6] Installing Python packages..."
+# 5. Create virtual environment with system site-packages
+# This inherits PyTorch/CUDA from RunPod's base image (saves time & disk)
+echo "[5/7] Creating virtual environment with --system-site-packages..."
+python -m venv --system-site-packages venv
+source venv/bin/activate
+
+# 6. Install Python dependencies (only what's not in system)
+echo "[6/7] Installing Python packages..."
+pip install --upgrade pip
 pip install transformers accelerate gensim pandas nltk tensorflow tf-keras
 
-# 6. Download NLTK data and move files
-echo "[6/6] Setting up data files..."
+# 7. Download NLTK data and move files
+echo "[7/7] Setting up data files..."
 python -c "import nltk; nltk.download('punkt_tab'); nltk.download('punkt')"
 
 # Move TSV files if they're nested
@@ -47,10 +54,17 @@ fi
 echo ""
 echo "=== Setup Complete! ==="
 echo ""
+echo "Virtual environment created at: /workspace/project/venv"
+echo ""
+echo "IMPORTANT: Activate venv before running (already active in this session):"
+echo "  source /workspace/project/venv/bin/activate"
+echo ""
 echo "To train the model, run:"
 echo "  python src/gpt2.py --train"
 echo ""
 echo "To generate jokes with existing model, run:"
 echo "  python src/gpt2.py"
 echo ""
-
+echo "To download your trained model:"
+echo "  cd models && zip -r model.zip distilgpt2-jokes && wormhole send model.zip"
+echo ""
