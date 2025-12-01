@@ -1,10 +1,10 @@
 '''
-    This file fine-tunes DistilGPT-2 for joke generation using transfer learning.
+    This file fine-tunes GPT-2 for joke generation using transfer learning.
     It handles the following steps:
 
     1) Load the preprocessed joke data
     2) Prepare data in the format expected by GPT-2
-    3) Fine-tune DistilGPT-2 on the joke corpus
+    3) Fine-tune GPT-2 on the joke corpus
     4) Save the fine-tuned model
     5) Provide text generation functionality
 '''
@@ -32,12 +32,16 @@ from prepare_data import (
 )
 import numpy as np
 
-# Training parameters
-EPOCHS = 3
-LEARNING_RATE = 5e-5
-BATCH_SIZE = 8
-MAX_LENGTH = 128  # Maximum sequence length for GPT-2
-GRADIENT_ACCUMULATION_STEPS = 4  # Effective batch size = 8 * 4 = 32
+# Training parameters (optimized for 4090 GPU)
+EPOCHS = 8
+LEARNING_RATE = 2e-5
+BATCH_SIZE = 16
+MAX_LENGTH = 192  # Maximum sequence length for GPT-2 (longer jokes)
+GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
+
+# Data quality filtering
+MIN_JOKE_LENGTH = 20
+MAX_JOKE_LENGTH = 400
 
 # Make sure pytorch and cuda works
 print(f"PyTorch version: {torch.__version__}")
@@ -60,8 +64,10 @@ class JokeDataset(Dataset):
     def __getitem__(self, idx):
         joke = self.jokes[idx]
         
-        # Add special tokens for better learning
-        text = f"<|startoftext|>{joke}<|endoftext|>"
+        # Use registered special tokens for proper tokenization
+        bos = self.tokenizer.bos_token if self.tokenizer.bos_token else ''
+        eos = self.tokenizer.eos_token if self.tokenizer.eos_token else ''
+        text = f"{bos}{joke}{eos}"
         
         # Tokenize
         encodings = self.tokenizer(
@@ -83,7 +89,7 @@ def prepare_joke_data():
     '''
     Load and prepare joke data from both sources
     Returns:
-        List of joke strings
+        List of joke strings (filtered by quality)
     '''
     print("Loading joke data...")
     
@@ -97,7 +103,7 @@ def prepare_joke_data():
         kaggle_jokes.append(joke)
     
     # Load reddit jokes (more samples for better training)
-    _, rjokes_tokens = read_rjokes_data("train.tsv", max_jokes=75000)
+    _, rjokes_tokens = read_rjokes_data("train.tsv", max_jokes=100000)
     rjokes = []
     for tokens in rjokes_tokens:
         joke = ' '.join([t for t in tokens if t not in ['<s>', '</s>', '_']])
@@ -105,13 +111,17 @@ def prepare_joke_data():
         rjokes.append(joke)
     
     all_jokes = kaggle_jokes + rjokes
-    print(f"Total jokes loaded: {len(all_jokes)}")
+    print(f"Total jokes loaded (before filtering): {len(all_jokes)}")
     
-    return all_jokes
+    # Filter jokes by length for quality (remove too short/long)
+    filtered_jokes = [j for j in all_jokes if MIN_JOKE_LENGTH <= len(j) <= MAX_JOKE_LENGTH]
+    print(f"Jokes after quality filtering ({MIN_JOKE_LENGTH}-{MAX_JOKE_LENGTH} chars): {len(filtered_jokes)}")
+    
+    return filtered_jokes
 
-def fine_tune_model(model, tokenizer, train_dataset, output_dir):
+def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     '''
-    Fine-tune the GPT-2 model on joke data
+    Fine-tune the GPT-2 model on joke data with validation
     '''
     # Data collator for language modeling
     data_collator = DataCollatorForLanguageModeling(
@@ -119,31 +129,48 @@ def fine_tune_model(model, tokenizer, train_dataset, output_dir):
         mlm=False  # GPT-2 uses causal LM, not masked LM
     )
     
-    # Training arguments
+    # Training arguments (optimized)
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
         num_train_epochs=EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         learning_rate=LEARNING_RATE,
         weight_decay=0.01,
-        warmup_steps=200,       # Optimized
-        logging_steps=50,       # More frequent logging
-        save_strategy="epoch",  # Save at end of each epoch
-        save_total_limit=2,
+        # Optimized scheduler settings
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.1,  # 10% warmup (better than fixed steps)
+        # Regularization
+        label_smoothing_factor=0.1,  # Prevents overconfidence
+        max_grad_norm=1.0,  # Gradient clipping for stability
+        # Logging and saving
+        logging_steps=50,
+        save_strategy="steps",
+        save_steps=500,
+        save_total_limit=3,
+        # Evaluation for overfitting detection
+        eval_strategy="steps",
+        eval_steps=200,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        # Performance
         fp16=torch.cuda.is_available(),
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
         report_to="none",
         logging_dir=f"{output_dir}/logs",
-        dataloader_num_workers=2
     )
     
-    # Initialize trainer
+    # Initialize trainer with eval dataset
     trainer = Trainer(
         model=model,
         args=training_args,
         data_collator=data_collator,
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
     )
     
     # Train
@@ -159,7 +186,7 @@ def fine_tune_model(model, tokenizer, train_dataset, output_dir):
     
     return trainer
 
-def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top_k=50, top_p=0.95, num_return_sequences=1):
+def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top_k=50, top_p=0.95, num_return_sequences=1, repetition_penalty=1.2):
     '''
     Generate jokes using the fine-tuned model
     Args:
@@ -171,20 +198,21 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
         top_k: Top-k sampling parameter
         top_p: Nucleus sampling parameter
         num_return_sequences: Number of jokes to generate
+        repetition_penalty: Penalty for repeating tokens (>1.0 = less repetition)
     Returns:
         List of generated jokes
     '''
     model.eval()
     
-    # Encode prompt
-    input_text = f"<|startoftext|>{prompt}"
+    # Encode prompt using the registered bos_token
+    input_text = f"{tokenizer.bos_token}{prompt}"
     input_ids = tokenizer.encode(input_text, return_tensors='pt')
     
     # Move to same device as model
     device = next(model.parameters()).device
     input_ids = input_ids.to(device)
     
-    # Generate
+    # Generate with improved coherence settings
     with torch.no_grad():
         output = model.generate(
             input_ids,
@@ -194,8 +222,11 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
             top_p=top_p,
             num_return_sequences=num_return_sequences,
             do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            # Coherence improvements
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=3,  # Prevent 3-gram repetition
         )
     
     # Decode outputs
@@ -211,7 +242,7 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("DistilGPT-2 Joke Generator - Transfer Learning")
+    print("GPT-2 Joke Generator - Transfer Learning (Optimized)")
     print("=" * 70)
     
     # Parse arguments
@@ -225,7 +256,7 @@ if __name__ == "__main__":
     # Create models directory if it doesn't exist
     os.makedirs(MODEL_DIR, exist_ok=True)
     
-    model_path = f"{MODEL_DIR}/distilgpt2-jokes"
+    model_path = f"{MODEL_DIR}/gpt2-jokes"
     
     # Check if model exists
     if os.path.exists(model_path) and not args.train:
@@ -246,14 +277,20 @@ if __name__ == "__main__":
         print("Training new model with transfer learning...")
         print("=" * 70)
         
-        # Load pre-trained DistilGPT-2
-        print("\nLoading DistilGPT-2 base model...")
-        tokenizer = GPT2Tokenizer.from_pretrained('distilgpt2')
-        model = GPT2LMHeadModel.from_pretrained('distilgpt2')
+        # Load pre-trained GPT-2 (full model, 124M params)
+        print("\nLoading GPT-2 base model (124M params)...")
+        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        model = GPT2LMHeadModel.from_pretrained('gpt2')
         
-        # Add padding token
-        tokenizer.pad_token = tokenizer.eos_token
-        model.config.pad_token_id = tokenizer.eos_token_id
+        # Register special tokens properly (CRITICAL for coherent output)
+        special_tokens = {
+            'bos_token': '<|startoftext|>',
+            'eos_token': '<|endoftext|>',
+            'pad_token': '<|pad|>'
+        }
+        num_added = tokenizer.add_special_tokens(special_tokens)
+        model.resize_token_embeddings(len(tokenizer))
+        print(f"Added {num_added} special tokens, vocab size: {len(tokenizer)}")
         
         # Set device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -263,13 +300,21 @@ if __name__ == "__main__":
         # Prepare data
         jokes = prepare_joke_data()
         
-        # Create dataset
-        print("\nCreating dataset...")
-        train_dataset = JokeDataset(jokes, tokenizer)
-        print(f"Dataset size: {len(train_dataset)} jokes")
+        # Split into train/eval (5% for validation)
+        split_idx = int(len(jokes) * 0.95)
+        train_jokes = jokes[:split_idx]
+        eval_jokes = jokes[split_idx:]
+        print(f"\nTrain/Eval split: {len(train_jokes)} train, {len(eval_jokes)} eval")
         
-        # Fine-tune
-        trainer = fine_tune_model(model, tokenizer, train_dataset, model_path)
+        # Create datasets
+        print("Creating datasets...")
+        train_dataset = JokeDataset(train_jokes, tokenizer)
+        eval_dataset = JokeDataset(eval_jokes, tokenizer)
+        print(f"Train dataset: {len(train_dataset)} jokes")
+        print(f"Eval dataset: {len(eval_dataset)} jokes")
+        
+        # Fine-tune with validation
+        trainer = fine_tune_model(model, tokenizer, train_dataset, eval_dataset, model_path)
         
         # Save final model
         print("\n" + "=" * 70)
