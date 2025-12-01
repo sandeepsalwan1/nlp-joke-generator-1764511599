@@ -32,16 +32,17 @@ from prepare_data import (
 )
 import numpy as np
 
-# Training parameters (optimized for 4090 GPU)
-EPOCHS = 8
-LEARNING_RATE = 2e-5
+EPOCHS = 10
+LEARNING_RATE = 3e-5
 BATCH_SIZE = 16
 MAX_LENGTH = 192  # Maximum sequence length for GPT-2 (longer jokes)
 GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
 
-# Data quality filtering
+# Data quality filtering so nothing is bad 
 MIN_JOKE_LENGTH = 20
 MAX_JOKE_LENGTH = 400
+
+
 
 # Make sure pytorch and cuda works
 print(f"PyTorch version: {torch.__version__}")
@@ -64,10 +65,8 @@ class JokeDataset(Dataset):
     def __getitem__(self, idx):
         joke = self.jokes[idx]
         
-        # Use registered special tokens for proper tokenization
-        bos = self.tokenizer.bos_token if self.tokenizer.bos_token else ''
-        eos = self.tokenizer.eos_token if self.tokenizer.eos_token else ''
-        text = f"{bos}{joke}{eos}"
+        # Only use eos_token (no bos - GPT2 doesn't need it, avoids random embeddings)
+        text = f"{joke}{self.tokenizer.eos_token}"
         
         # Tokenize
         encodings = self.tokenizer(
@@ -93,16 +92,16 @@ def prepare_joke_data():
     '''
     print("Loading joke data...")
     
-    # Load kaggle jokes
+    #load kaggle jokes
     kaggle_tokens = read_kjokes_data()
     kaggle_jokes = []
     for tokens in kaggle_tokens:
-        # Remove special tokens and reconstruct text
+        # Remove special tokens and reconstruct text not needed
         joke = ' '.join([t for t in tokens if t not in ['<s>', '</s>', '_']])
         joke = joke.replace(' _ ', ' ')  # Handle space character
         kaggle_jokes.append(joke)
     
-    # Load reddit jokes (more samples for better training)
+    # Load reddit jokes (more samples for better training) get tokens
     _, rjokes_tokens = read_rjokes_data("train.tsv", max_jokes=100000)
     rjokes = []
     for tokens in rjokes_tokens:
@@ -117,7 +116,11 @@ def prepare_joke_data():
     filtered_jokes = [j for j in all_jokes if MIN_JOKE_LENGTH <= len(j) <= MAX_JOKE_LENGTH]
     print(f"Jokes after quality filtering ({MIN_JOKE_LENGTH}-{MAX_JOKE_LENGTH} chars): {len(filtered_jokes)}")
     
-    return filtered_jokes
+    # Minimal NSFW filter (very light to keep useful)
+    clean_jokes = [j for j in filtered_jokes if not any(w in j.lower() for w in ['fuck', 'bitch', 'dick', 'cock', 'pussy'])]
+    print(f"Jokes after minimal NSFW filter: {len(clean_jokes)} (removed {len(filtered_jokes) - len(clean_jokes)})")
+    
+    return clean_jokes
 
 def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     '''
@@ -126,10 +129,10 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     # Data collator for language modeling
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm=False  # GPT-2 uses causal LM, not masked LM
+        mlm=False  # GPT-2 uses causal LM, not masked LM so i changed this
     )
     
-    # Training arguments (optimized)
+    # (optimized) for cuda
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
@@ -138,12 +141,12 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
         per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         learning_rate=LEARNING_RATE,
-        weight_decay=0.01,
+        weight_decay=0.02,  # More regularization
         # Optimized scheduler settings
         lr_scheduler_type="cosine",
-        warmup_ratio=0.1,  # 10% warmup (better than fixed steps)
+        warmup_ratio=0.06,  # Faster warmup
         # Regularization
-        label_smoothing_factor=0.1,  # Prevents overconfidence
+        label_smoothing_factor=0.05,  # Reduced for clearer loss signal
         max_grad_norm=1.0,  # Gradient clipping for stability
         # Logging and saving
         logging_steps=50,
@@ -186,6 +189,73 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     
     return trainer
 
+def grid_search_lr(model_class, tokenizer, train_dataset, eval_dataset, output_dir):
+    '''
+    Simple grid search over learning rates (1-2 epochs each)
+    Returns best learning rate based on eval loss
+    '''
+    lr_options = [1e-5, 2e-5, 3e-5]
+    best_lr = LEARNING_RATE
+    best_loss = float('inf')
+    
+    print("\n" + "=" * 70)
+    print("Running grid search over learning rates...")
+    print("=" * 70)
+    
+    for lr in lr_options:
+        print(f"\nTesting LR={lr}...")
+        
+        # Fresh model for each test
+        model = model_class.from_pretrained('gpt2')
+        model.config.attn_pdrop = 0.15
+        model.config.resid_pdrop = 0.15
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+        
+        data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+        
+        # Quick 1-epoch training
+        args = TrainingArguments(
+            output_dir=f"{output_dir}/grid_search",
+            num_train_epochs=1,
+            per_device_train_batch_size=BATCH_SIZE,
+            per_device_eval_batch_size=BATCH_SIZE,
+            learning_rate=lr,
+            weight_decay=0.02,
+            warmup_ratio=0.06,
+            eval_strategy="epoch",
+            save_strategy="no",
+            fp16=torch.cuda.is_available(),
+            report_to="none",
+        )
+        
+        trainer = Trainer(
+            model=model,
+            args=args,
+            data_collator=data_collator,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+        
+        trainer.train()
+        eval_result = trainer.evaluate()
+        eval_loss = eval_result['eval_loss']
+        
+        print(f"LR={lr} -> Eval Loss: {eval_loss:.4f}")
+        
+        if eval_loss < best_loss:
+            best_loss = eval_loss
+            best_lr = lr
+        
+        # Cleanup
+        del model, trainer
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    print(f"\nBest LR: {best_lr} (loss: {best_loss:.4f})")
+    return best_lr
+
+
 def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top_k=50, top_p=0.95, num_return_sequences=1, repetition_penalty=1.2):
     '''
     Generate jokes using the fine-tuned model
@@ -204,9 +274,8 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
     '''
     model.eval()
     
-    # Encode prompt using the registered bos_token
-    input_text = f"{tokenizer.bos_token}{prompt}"
-    input_ids = tokenizer.encode(input_text, return_tensors='pt')
+    # Encode prompt directly (no bos_token needed)
+    input_ids = tokenizer.encode(prompt, return_tensors='pt')
     
     # Move to same device as model
     device = next(model.parameters()).device
@@ -226,7 +295,7 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
             eos_token_id=tokenizer.eos_token_id,
             # Coherence improvements
             repetition_penalty=repetition_penalty,
-            no_repeat_ngram_size=3,  # Prevent 3-gram repetition
+            no_repeat_ngram_size=3,  # Prevent 3-gram repetition e.g. the dog dog dog ran
         )
     
     # Decode outputs
@@ -245,20 +314,22 @@ if __name__ == "__main__":
     print("GPT-2 Joke Generator - Transfer Learning (Optimized)")
     print("=" * 70)
     
-    # Parse arguments
+    # parse arguments for running script
     parser = argparse.ArgumentParser()
     parser.add_argument('--train', action='store_true', 
                        help='Force retraining even if model exists')
     parser.add_argument('--prompt', type=str, default=None,
                        help='Custom prompt for generation')
+    parser.add_argument('--grid-search', action='store_true',
+                       help='Run grid search for learning rate before training')
     args = parser.parse_args()
     
-    # Create models directory if it doesn't exist
+    # Create models directory if it doesn't exist in the gpu repo area e.g. models/
     os.makedirs(MODEL_DIR, exist_ok=True)
     
-    model_path = f"{MODEL_DIR}/gpt2-jokes"
+    model_path = f"{MODEL_DIR}/gpt2-jokes-v2"
     
-    # Check if model exists
+    # Check if model exists gpu
     if os.path.exists(model_path) and not args.train:
         print("\n" + "=" * 70)
         print("Loading existing fine-tuned model...")
@@ -277,20 +348,19 @@ if __name__ == "__main__":
         print("Training new model with transfer learning...")
         print("=" * 70)
         
-        # Load pre-trained GPT-2 (full model, 124M params)
+        # Load pre-trained GPT-2 (full model, 124M params) loading
         print("\nLoading GPT-2 base model (124M params)...")
         tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         model = GPT2LMHeadModel.from_pretrained('gpt2')
         
-        # Register special tokens properly (CRITICAL for coherent output)
-        special_tokens = {
-            'bos_token': '<|startoftext|>',
-            'eos_token': '<|endoftext|>',
-            'pad_token': '<|pad|>'
-        }
-        num_added = tokenizer.add_special_tokens(special_tokens)
-        model.resize_token_embeddings(len(tokenizer))
-        print(f"Added {num_added} special tokens, vocab size: {len(tokenizer)}")
+        # Reuse existing pre-trained token (no random embeddings)
+        tokenizer.pad_token = tokenizer.eos_token
+        print(f"Using existing eos_token as pad_token, vocab size: {len(tokenizer)}")
+        
+        # Add dropout for regularization (no new deps, built into GPT2)
+        model.config.attn_pdrop = 0.15
+        model.config.resid_pdrop = 0.15
+        print(f"Dropout set: attn={model.config.attn_pdrop}, resid={model.config.resid_pdrop}")
         
         # Set device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -312,6 +382,17 @@ if __name__ == "__main__":
         eval_dataset = JokeDataset(eval_jokes, tokenizer)
         print(f"Train dataset: {len(train_dataset)} jokes")
         print(f"Eval dataset: {len(eval_dataset)} jokes")
+        
+        # Optional grid search for learning rate
+        if args.grid_search:
+            best_lr = grid_search_lr(GPT2LMHeadModel, tokenizer, train_dataset, eval_dataset, model_path)
+            LEARNING_RATE = best_lr
+            # Reload fresh model after grid search
+            model = GPT2LMHeadModel.from_pretrained('gpt2')
+            tokenizer.pad_token = tokenizer.eos_token
+            model.config.attn_pdrop = 0.15
+            model.config.resid_pdrop = 0.15
+            model = model.to(device)
         
         # Fine-tune with validation
         trainer = fine_tune_model(model, tokenizer, train_dataset, eval_dataset, model_path)
@@ -341,7 +422,7 @@ if __name__ == "__main__":
         ]
     
     temperatures = [0.7, 1.0, 1.3]
-    
+    #TEST TEMPERATURES
     for temp in temperatures:
         print(f"\n{'=' * 70}")
         print(f"Temperature: {temp}")
