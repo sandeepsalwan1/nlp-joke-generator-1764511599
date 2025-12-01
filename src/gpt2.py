@@ -148,11 +148,11 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
         # Logging and saving
         logging_steps=50,
         save_strategy="steps",
-        save_steps=500,
+        save_steps=250,
         save_total_limit=3,
         # Evaluation for overfitting detection
         eval_strategy="steps",
-        eval_steps=200,
+        eval_steps=250,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
