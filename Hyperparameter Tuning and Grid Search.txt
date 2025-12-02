@@ -1,0 +1,96 @@
+LLM Track: Setting Models Up for Success
+
+Hyperparameters
+As you know, there are various hyperparameters that you set when training/running a model
+The hyperparameters you can adjust are dependent upon the model
+Logistic regression models, neural nets, and language models all have different hyperparameters that can be adjusted
+
+Hyperparameter options: Neural networks
+We’ve learned about some of the hyperparameters we can adjust for neural nets and transformer-based text classification models 
+Number of training epochs
+Batch size
+Optimizer to use
+Learning rate
+Loss function
+Among other hyperparameters, these can be set as training arguments for HuggingFace’s Trainer class 
+
+Hyperparameter options: Logistic regression
+You can also adjust several hyperparameters for logistic regression models, for instance with scikit-learn’s LogisticRegression class
+solver: algorithm to use for optimization
+‘liblinear’ is a good choice for smaller datasets
+‘sag’ and ‘saga’ are faster for larger datasets
+penalty: norm of the penalty (note that some penalties may not work for some solvers)
+C: inverse strength of regularization (smaller C = more regulatization)
+max_iter: maximum iterations for the solvers to converge
+fit_intercept: add a bias term/intercept to the decision function (true by default)
+
+Hyperparameter options: Language Models
+Typically, you will use LLMs for inference rather than finetuning them
+Finetuning involves many of the same hyperparameters as neural networks
+Learning rate
+Batch size
+Epochs
+Etc.
+One consideration for finetuning is whether you want to do some form of parameter-efficient finetuning (PEFT), where some model parameters are frozen
+As we’ve learned, there are also come parameters you can tune when using these models for inference
+Temperature
+Top-p
+Top-k
+
+Selecting the right hyperparameters is important!
+Choice of hyperparameters can drastically alter model performance
+https://arxiv.org/html/2507.23315v1 
+https://arxiv.org/html/2507.23315v1 
+
+But how do we choose the right hyperparameters?
+Deep learning models are “black boxes”
+Behave in ways we don’t always expect
+So the right hyperparameters are hard to predict
+Best approach to hyperparameter selection: testing!!
+Prior work can inform the hyperparameter values to test
+0.001 is often suggested as a good starting point for Adam
+
+Grid Search
+A popular method for hyperparameter selection is grid search
+Idea: exhaustive search on each combination of hyperparameter values you want to test
+To conduct a grid search:
+Choose values you want to test for each hyperparameter
+Train on each possible combination of given hyperparameter values
+Evaluate each trained model
+Choose hyperparameter combination that gives you the best results
+
+Grid Search: Drawbacks
+Can be computationally expensive
+May miss optimal values not defined in the grid
+
+Alternative: Random Search
+Rather than search through a set of specific values, random search randomly picks each hyperparameter within a defined range
+Can be more computationally efficient than grid search
+Can explore a continuous set of hyperparameters
+Good for high-dimensional search spaces - can often find high-performing combinations in less time than grid search
+https://www.sabrepc.com/blog/deep-learning-and-ai/grid-search-and-random-search?srsltid=AfmBOor1okeAyrk4t7hk8BsPDkq3ArYH0c1z2trPs8ZnEuQFzHzbKua5 
+
+“Smarter” approach: Bayesian Optimization
+Learns from previous results to decide what values to try next
+Builds probabilistic model to predict performance given a set of hyperparameters
+Probabilistic model is defined as P(score(y) | hyperparameters(x))
+Model is updated after each hyperparameter combination tested
+
+Implementing Hyperparameter Search
+There are lots of Python packages out there for hyperparameter searches!
+One good option for logistic regression models is Scikit Learn’s hyperparameter search functions
+GridSearchCV
+RandomizedSearchCV
+
+Implementing Hyperparameter Search
+GridSearchCV and RandomizedSearchCV also work for neural nets!
+Just need to change the estimator used
+
+Implementing Hyperparameter Search
+Grid search and randomized search can also be implemented manually
+This may be a good approach if you’re conducting a hyperparameter search on LLMs
+Typically, with LLMs, a hyperparameter search doesn’t involve retraining the LLM - too expensive
+Instead, you can tune parameters that impact text generation: temperature, top p, top k, max tokens, etc.
+You can also vary the prompt passed to the LLM!
+
+…Think of the experiments you did with LLMs in Homework 2 as a mini hyperparameter search
