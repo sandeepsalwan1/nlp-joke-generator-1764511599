@@ -8,7 +8,7 @@ echo "=== NLP Joke Generator - RunPod Setup ==="
 
 # 1. Install system dependencies
 echo "[1/7] Installing system tools..."
-apt-get update && apt-get install -y git-lfs zip magic-wormhole
+apt-get update && apt-get install -y git-lfs zip 
 
 # 2. Setup Git LFS
 echo "[2/7] Setting up Git LFS..."
